@@ -11,8 +11,8 @@
 #include "esp_vfs_dev.h"
 #include "esp_adc/adc_oneshot.h"
 
-#define TXD_PIN (GPIO_NUM_5)  // ESP32 TX to UART RX
-#define RXD_PIN (GPIO_NUM_4)  // ESP32 RX to UART TX
+#define TXD_PIN (GPIO_NUM_5)  //ESP32 TX to UART RX
+#define RXD_PIN (GPIO_NUM_4)  //ESP32 RX to UART TX
 #define UART_NUM UART_NUM_1
 #define TRIGGER_GPIO GPIO_NUM_0
 #define FS80NK_GPIO GPIO_NUM_3
@@ -25,16 +25,22 @@
 
 static const char *TAG = "LoRa_UART";
 
-static int status_flag = 0;
+//prevents repeated sending
 static bool last_state = 1;
 
 static adc_oneshot_unit_handle_t adc_handle;
 
-static int frequency = 10000;
+#define C_ACTIVE 7 //length of active code word ("active:")
+#define C_FREQ 5   //length of frequency code word ("freq:")
+
+//global control variables
+static int frequency = 10000; //currently unused due to interference
 static bool check_up = 0;
 static uint8_t active_sensors = 3;
 
-// Initialize UART
+const int min_freq = 1000; //minimal required frequency
+
+//initialize UART
 void uart_init() {
     const uart_config_t uart_config = {
         .baud_rate = 9600,
@@ -50,10 +56,11 @@ void uart_init() {
     uart_set_pin(UART_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
-// Send Data
+//send data to LoRa module
 void uart_send(const char* data) {
     uart_write_bytes(UART_NUM, data, strlen(data));
 }
+
 
 void parse_data(const char *input, char **active_out, char **freq_out, char **check) {
     const char *active_ptr = strstr(input, "active:");
@@ -68,28 +75,23 @@ void parse_data(const char *input, char **active_out, char **freq_out, char **ch
     }
 
     if (active_ptr) {
-        active_ptr += 7; //7 is length of "active:"
-        int len = strspn(active_ptr, "01");
+        active_ptr += C_ACTIVE; //length of "active:"
+        int len = strspn(active_ptr, "01"); //active is in binary format so only 1 and 0
         *active_out = (char *)malloc(len + 1);
         strncpy(*active_out, active_ptr, len);
         (*active_out)[len] = '\0';
     }
 
     if (freq_ptr) {
-        freq_ptr += 5; //5 is length of "freq:"
-        int len = strspn(freq_ptr, "0123456789");
+        freq_ptr += C_FREQ; //length of "freq:"
+        int len = strspn(freq_ptr, "0123456789"); //freq is a number so only check for numbers
         *freq_out = (char *)malloc(len + 1);
         strncpy(*freq_out, freq_ptr, len);
         (*freq_out)[len] = '\0';
     }
-
-    if (check) {
-
-    }
-
 }
 
-// Receive Data
+//receive Data
 void uart_receive_task(void *arg) {
     uint8_t data[BUF_SIZE];
     while (1) {
@@ -99,7 +101,7 @@ void uart_receive_task(void *arg) {
             if (len < BUF_SIZE) {
                 data[len] = '\0';
             } else {
-                data[BUF_SIZE - 1] = '\0';
+                data[BUF_SIZE - 1] = '\0'; //cuts of messages that are to long
             }
 
             ESP_LOGI(TAG, "Received: %s", data);
@@ -111,8 +113,8 @@ void uart_receive_task(void *arg) {
             char *endptr;
 
             if (freq != NULL) {
-                int num_freq = strtol(freq, &endptr, 10); // 10 for decimal 
-                if (num_freq >= 1000) {
+                int num_freq = strtol(freq, &endptr, 10); //10 for decimal 
+                if (num_freq >= min_freq) { //eliminate small frequencies that could cause problems
                     frequency = num_freq;
                 }
                 
@@ -130,11 +132,11 @@ void uart_receive_task(void *arg) {
 
             free(freq);
             free(active);
-            printf("\n");
         }
     }
 }
 
+//initialize trigger sensor
 void init_trigger_pin() {
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << TRIGGER_GPIO),
@@ -146,6 +148,7 @@ void init_trigger_pin() {
     gpio_config(&io_conf);
 }
 
+//initialize IR sensor
 void fs80nk_init() {
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << FS80NK_GPIO),
@@ -157,6 +160,7 @@ void fs80nk_init() {
     gpio_config(&io_conf);
 }
 
+//initialize temperature sensor
 void ntc_init() {
     adc_oneshot_unit_init_cfg_t init_config = {
         .unit_id = ADC_UNIT_1,
@@ -172,6 +176,7 @@ void ntc_init() {
     adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_2, &chan_config);
 }
 
+//ir logic
 void ir_sensor() {
     if (gpio_get_level(FS80NK_GPIO) == 0) {
         printf("Object detected\n");
@@ -182,43 +187,23 @@ void ir_sensor() {
     }
 }
 
+//ntc logic
 void NTC_sensor() {
     int value;
     adc_oneshot_read(adc_handle, ADC_CHANNEL_2, &value);
-    float volt = ((float)value / 4095.0) * 3.3;
+    float volt = ((float)value / 4095.0) * 3.3; //Numbers out of datasheet. Adjust based on sensor
     if (volt <= 0.0) printf("NTC ERROR");
     float ohm = (3.3 * NTC_OHM / volt) - NTC_OHM;
 
     const float NTC = 3950;     // adjust to your thermistor
-    float temp = 1.0 / (1.0/(KELVIN+25) + (1.0/NTC)*log(ohm/NTC_OHM)) - KELVIN + 6; //+6 to fix offset
+    float temp = 1.0 / (1.0/(KELVIN+25) + (1.0/NTC)*log(ohm/NTC_OHM)) - KELVIN + 6; //+6 to fix offset (trial and error) +25 for average temperature. Change based on location
     printf("Temperature: %f\n", temp);
     char buffer[64];
     snprintf(buffer, sizeof(buffer), "Temperature: %f\n", temp);
     uart_send(buffer);
 }
 
-void sensor_trigger_0() {
-    bool current_state = gpio_get_level(TRIGGER_GPIO);
-    if (current_state == 0) {
-        uart_send("Sensor 0 AAN\n");
-        printf("0 AAN\n");
-    } else if (current_state == 1) {
-        uart_send("Sensor 0 UIT\n");
-        printf("0 UIT\n");
-    }
-}
-
-void sensor_trigger_1() {
-    bool current_state = gpio_get_level(TRIGGER_GPIO);
-    if (current_state == 0) {
-        uart_send("Sensor 1 AAN\n");
-        printf("1 AAN\n");
-    } else if (current_state == 1) {
-        uart_send("Sensor 1 UIT\n");
-        printf("1 UIT\n");
-    }
-}
-
+//temporary sensor logic
 void sensor_trigger_2() {
     bool current_state = gpio_get_level(TRIGGER_GPIO);
     if (current_state == 0) {
@@ -241,7 +226,7 @@ void sensor_trigger_3() {
     }
 }
 
-//Activate for testing purposes
+//can be used for testing purposes
 
 // void message_task(void *arg) {
 //     int counter = 0;
@@ -282,6 +267,7 @@ void sensor_trigger_3() {
 //     }
 // }
 
+//send messages and control sensors
 void message_task(void *arg) {
     void (*func_array[])() = {NTC_sensor, ir_sensor, sensor_trigger_2, sensor_trigger_3};
     int func_count = sizeof(func_array) / sizeof(func_array[0]);
@@ -292,7 +278,6 @@ void message_task(void *arg) {
         if((current_state != last_state && current_state == 0) || check_up == 1) {
             for (int i = 0; i < func_count; i++) {
                 if (active_sensors & (1<<i)) {
-                    printf("In active if\n");
                     func_array[i]();
                 }
             }
@@ -306,12 +291,16 @@ void message_task(void *arg) {
 }
 
 void app_main(void) {
+    //initialize everything
     uart_init();
     init_trigger_pin();
     fs80nk_init();
     ntc_init();
+
+    //receive task gets higher priority to prevent the module from missing messages
     xTaskCreate(message_task, "message_task", 2048, NULL, 4, NULL);
     xTaskCreate(uart_receive_task, "uart_receive_task", 4096, NULL, 5, NULL);
 
+    //send message over network to let the other nodes know that this node exists and where it exists
     uart_send("Klaar:");
 }
