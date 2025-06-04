@@ -122,7 +122,7 @@ void uart_receive_task(void *arg) {
 
             if (active != NULL) {
                 active_sensors = 0x00;
-                for (int i = 0; active[i] != '\0'; i++) {
+                for (int i = 0; active[i] != '\0'; i++) { //bitshifts for length of string and places 1 where needed.
                     active_sensors <<= 1;
                     if (active[i] == '1') {
                         active_sensors |= 1;
@@ -188,19 +188,22 @@ void ir_sensor() {
 }
 
 //ntc logic
-void NTC_sensor() {
+void ntc_sensor() {
     int value;
     adc_oneshot_read(adc_handle, ADC_CHANNEL_2, &value);
-    float volt = ((float)value / 4095.0) * 3.3; //Numbers out of datasheet. Adjust based on sensor
-    if (volt <= 0.0) printf("NTC ERROR");
-    float ohm = (3.3 * NTC_OHM / volt) - NTC_OHM;
+    if (value > 0) {
+        float volt = ((float)value / 4095.0) * 3.3; //numbers out of datasheet. Adjust based on sensor
+        float ohm = (3.3 * NTC_OHM / volt) - NTC_OHM;
 
-    const float NTC = 3950;     // adjust to your thermistor
-    float temp = 1.0 / (1.0/(KELVIN+25) + (1.0/NTC)*log(ohm/NTC_OHM)) - KELVIN + 6; //+6 to fix offset (trial and error) +25 for average temperature. Change based on location
-    printf("Temperature: %f\n", temp);
-    char buffer[64];
-    snprintf(buffer, sizeof(buffer), "Temperature: %f\n", temp);
-    uart_send(buffer);
+        const float NTC = 3950;     // adjust to your thermistor
+        float temp = 1.0 / (1.0/(KELVIN+25) + (1.0/NTC)*log(ohm/NTC_OHM)) - KELVIN + 6; //+6 to fix offset (trial and error) +25 for average temperature. Change based on location
+        printf("Temperature: %f\n", temp);
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "Temperature: %f\n", temp);
+        uart_send(buffer);
+    } else {
+        uart_send("Temperature: ERROR\n");
+    }
 }
 
 //temporary sensor logic
@@ -269,7 +272,7 @@ void sensor_trigger_3() {
 
 //send messages and control sensors
 void message_task(void *arg) {
-    void (*func_array[])() = {NTC_sensor, ir_sensor, sensor_trigger_2, sensor_trigger_3};
+    void (*func_array[])() = {ntc_sensor, ir_sensor, sensor_trigger_2, sensor_trigger_3};
     int func_count = sizeof(func_array) / sizeof(func_array[0]);
 
     while (1) {
@@ -304,3 +307,9 @@ void app_main(void) {
     //send message over network to let the other nodes know that this node exists and where it exists
     uart_send("Klaar:");
 }
+
+
+
+
+// fix second drive
+// fix malloc
