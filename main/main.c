@@ -1,3 +1,6 @@
+// Auteur : Guus van der Velde
+// Student: 1035940
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_vfs_dev.h"
 #include "esp_adc/adc_oneshot.h"
+#include "config.h"
 
 #define TXD_PIN (GPIO_NUM_5)  //ESP32 TX to UART RX
 #define RXD_PIN (GPIO_NUM_4)  //ESP32 RX to UART TX
@@ -18,7 +22,6 @@
 #define FS80NK_GPIO GPIO_NUM_3
 #define NTC_ADC ADC1_CHANNEL_2
 
-#define NTC_OHM 10000.0
 #define KELVIN 273.15
 
 #define BUF_SIZE (1024)
@@ -30,20 +33,19 @@ static bool last_state = 1;
 
 static adc_oneshot_unit_handle_t adc_handle;
 
-#define C_ACTIVE 7 //length of active code word ("active:")
-#define C_FREQ 5   //length of frequency code word ("freq:")
+
 
 //global control variables
-static int frequency = 10000; //currently unused due to interference
+static int frequency = 10; //frequency of checking the sensors in ms
 static bool check_up = 0;
 static uint8_t active_sensors = 3;
 
-const int min_freq = 1000; //minimal required frequency
+const int min_freq = 10; //minimal required frequency
 
 //initialize UART
 void uart_init() {
     const uart_config_t uart_config = {
-        .baud_rate = 9600,
+        .baud_rate = BAUD,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -61,6 +63,45 @@ void uart_send(const char* data) {
     uart_write_bytes(UART_NUM, data, strlen(data));
 }
 
+//initialize trigger sensor
+void init_trigger_pin() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << TRIGGER_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+}
+
+//initialize IR sensor
+void fs80nk_init() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << FS80NK_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+}
+
+//initialize temperature sensor
+void ntc_init() {
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1,
+    };
+    adc_oneshot_new_unit(&init_config, &adc_handle);
+
+    gpio_set_direction(GPIO_NUM_2, GPIO_MODE_INPUT);
+
+    adc_oneshot_chan_cfg_t chan_config = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_11,
+    };
+    adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_2, &chan_config);
+}
 
 void parse_data(const char *input, char **active_out, char **freq_out, char **check) {
     const char *active_ptr = strstr(input, "active:");
@@ -136,45 +177,7 @@ void uart_receive_task(void *arg) {
     }
 }
 
-//initialize trigger sensor
-void init_trigger_pin() {
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << TRIGGER_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
-}
 
-//initialize IR sensor
-void fs80nk_init() {
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << FS80NK_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
-}
-
-//initialize temperature sensor
-void ntc_init() {
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-    };
-    adc_oneshot_new_unit(&init_config, &adc_handle);
-
-    gpio_set_direction(GPIO_NUM_2, GPIO_MODE_INPUT);
-
-    adc_oneshot_chan_cfg_t chan_config = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_11,
-    };
-    adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_2, &chan_config);
-}
 
 //ir logic
 void ir_sensor() {
@@ -192,11 +195,10 @@ void ntc_sensor() {
     int value;
     adc_oneshot_read(adc_handle, ADC_CHANNEL_2, &value);
     if (value > 0) {
-        float volt = ((float)value / 4095.0) * 3.3; //numbers out of datasheet. Adjust based on sensor
-        float ohm = (3.3 * NTC_OHM / volt) - NTC_OHM;
+        float volt = ((float)value / ADC_MAX) * NTC_VOLT; //numbers out of datasheet. Adjust based on sensor
+        float ohm = (NTC_VOLT * NTC_OHM / volt) - NTC_OHM;
 
-        const float NTC = 3950;     // adjust to your thermistor
-        float temp = 1.0 / (1.0/(KELVIN+25) + (1.0/NTC)*log(ohm/NTC_OHM)) - KELVIN + 6; //+6 to fix offset (trial and error) +25 for average temperature. Change based on location
+        float temp = 1.0 / (1.0/(KELVIN+AVG_TMP) + (1.0/NTC)*log(ohm/NTC_OHM)) - KELVIN + NTC_OFFSET; //+6 to fix offset (trial and error) +25 for average temperature. Change based on location
         printf("Temperature: %f\n", temp);
         char buffer[64];
         snprintf(buffer, sizeof(buffer), "Temperature: %f\n", temp);
@@ -229,47 +231,6 @@ void sensor_trigger_3() {
     }
 }
 
-//can be used for testing purposes
-
-// void message_task(void *arg) {
-//     int counter = 0;
-//     while (1) {
-//         bool current_state = gpio_get_level(TRIGGER_GPIO);
-//         printf("Current: %d\n", current_state);
-//             if (current_state != last_state) {
-//                 switch (counter) {
-//                     case 0:
-//                         printf("case 0\n");
-//                         uart_send("active:0001 freq:5000");
-//                         counter++;
-//                         break;
-//                     case 1:
-//                         printf("case 1\n");
-//                         uart_send("active:0101");
-//                         counter++;
-//                         break;
-//                     case 2:
-//                         printf("case 2\n");
-//                         uart_send("freq:10000");
-//                         counter++;
-//                         break;
-//                     case 3:
-//                         printf("case 3\n");
-//                         uart_send("freq:5000 active:1111");
-//                         counter = 0;
-//                         break;
-//                     default:
-//                         counter = 0;
-//                         break;
-//                 }
-//             }
-
-//         last_state = current_state;
-
-//         vTaskDelay(pdMS_TO_TICKS(100));
-//     }
-// }
-
 //send messages and control sensors
 void message_task(void *arg) {
     void (*func_array[])() = {ntc_sensor, ir_sensor, sensor_trigger_2, sensor_trigger_3};
@@ -289,7 +250,7 @@ void message_task(void *arg) {
 
         uart_wait_tx_done(UART_NUM, portMAX_DELAY);
         last_state = current_state;
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(frequency));
     }
 }
 
@@ -308,8 +269,3 @@ void app_main(void) {
     uart_send("Klaar:");
 }
 
-
-
-
-// fix second drive
-// fix malloc
